@@ -1,8 +1,9 @@
-
 import streamlit as st
 import pandas as pd
 import datetime
 import io
+from streamlit_gsheets import GSheetsConnection
+import re
 
 # Internal imports
 import bundle_store
@@ -11,7 +12,13 @@ import association_utils
 
 st.set_page_config(page_title="Bundle Quoter", layout="wide")
 
+SPECIAL_USERS = ["amrit.ramadugu@omron.com", "arvey.e@ssa.omron.com", "chandan.khanal@omron.com"]
+
 # --- Helper Functions ---
+
+def is_special_user():
+    """Checks if the current user is a special user."""
+    return st.session_state.get("user_id") in SPECIAL_USERS
 
 def initialize_session_state():
     """Initialize session state variables."""
@@ -21,8 +28,8 @@ def initialize_session_state():
         st.session_state.companies = []
     if "models" not in st.session_state:
         st.session_state.models = []
-    if "user_email" not in st.session_state:
-        st.session_state.user_email = ""
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = ""
     if "bundle_builder_items" not in st.session_state:
         st.session_state.bundle_builder_items = [{"parent_model_id": None, "dependents": []}]
 
@@ -31,14 +38,14 @@ def initialize_session_state():
 def render_sidebar():
     """Render the sidebar for login and navigation."""
     st.sidebar.title("Bundle Quoter")
-    
+
     # --- Login Section ---
     st.sidebar.header("🔑 Login to Addlify")
     if st.session_state.adder:
-        st.sidebar.success(f"Logged in as {st.session_state.user_email}")
+        st.sidebar.success(f"Logged in as {st.session_state.user_id}")
         if st.sidebar.button("Logout"):
             st.session_state.adder = None
-            st.session_state.user_email = ""
+            st.session_state.user_id = ""
             st.session_state.companies = []
             st.session_state.models = []
             st.rerun()
@@ -46,26 +53,34 @@ def render_sidebar():
         email = st.sidebar.text_input("Email", key="login_email")
         password = st.sidebar.text_input("Password", type="password", key="login_password")
         if st.sidebar.button("Login"):
-            with st.spinner("Logging in..."):
-                adder, message = quoting_utils.login_to_addlify(email, password)
-                if adder:
-                    st.session_state.adder = adder
-                    st.session_state.user_email = email
-                    st.sidebar.success(message)
-                    # Preload data on login
-                    with st.spinner("Loading companies and models..."):
-                        st.session_state.companies = quoting_utils.fetch_all_companies(adder)
-                        st.session_state.models = pd.DataFrame(quoting_utils.load_models())
-                    st.rerun()
-                else:
-                    st.sidebar.error(message)
+            if not email:
+                st.sidebar.error("Please enter your email address to log in.")
+            else:
+                with st.spinner("Logging in..."):
+                    adder, message = quoting_utils.login_to_addlify(email, password)
+                    if adder:
+                        st.session_state.adder = adder
+                        st.session_state.user_id = email  # Set user_id to Addlify email
+                        st.sidebar.success(message)
+                        bundle_store.log_user_login(st.session_state.user_id)
+                        # Preload data on login
+                        with st.spinner("Loading companies and models..."):
+                            st.session_state.companies = quoting_utils.fetch_all_companies(adder)
+                            st.session_state.models = pd.DataFrame(quoting_utils.load_models())
+                        st.rerun()
+                    else:
+                        st.sidebar.error(message)
 
     st.sidebar.markdown("---")
     
     # --- Navigation ---
+    navigation_options = ["Bundle Builder", "My Bundles", "All Bundles", "Promotion Bundles", "Quote Page"]
+    if is_special_user():
+        navigation_options.extend(["User Login Log", "Quote Log"])
+
     page = st.sidebar.radio(
         "Navigation",
-        ["Bundle Builder", "Bundle Library", "Quote Page"],
+        navigation_options,
         key="page_selection"
     )
     return page
@@ -75,7 +90,15 @@ def render_sidebar():
 def page_bundle_builder():
     """Page for creating and editing bundles."""
     st.header("📦 Bundle Builder")
-    
+
+    if 'bundle_saved_success' in st.session_state:
+        st.success(st.session_state.bundle_saved_success)
+        del st.session_state.bundle_saved_success
+        # Clear form for the next entry
+        st.session_state.bundle_name = ""
+        st.session_state.bundle_desc = ""
+        st.session_state.bundle_builder_items = [{"parent_model_id": None, "dependents": []}]
+
     if not st.session_state.get("adder"):
         st.warning("Please log in to Addlify via the sidebar to create bundles.")
         return
@@ -87,6 +110,11 @@ def page_bundle_builder():
 
     bundle_name = st.text_input("Bundle Name", key="bundle_name")
     bundle_desc = st.text_area("Bundle Description", key="bundle_desc")
+    
+    bundle_type = "Standard"
+    if is_special_user():
+        if st.checkbox("Mark as Promotion Bundle"):
+            bundle_type = "Promotion"
 
     st.subheader("Bundle Items")
 
@@ -128,11 +156,16 @@ def page_bundle_builder():
         dep['dependent_group_name'] = dep_model['modelNumber'] if dep_model else ""
         dep['model_index'] = models_df.to_dict('records').index(dep_model) if dep_model else 0
 
-        dep['mapping_type'] = cols[1].selectbox(
-            "Mapping", ["Objective", "Subjective"], key=f"map_type_{i}",
-            index=["Objective", "Subjective"].index(dep.get('mapping_type', 'Objective'))
-        )
-        dep['multiple'] = cols[2].number_input("Multiple", min_value=0.1, value=dep.get('multiple', 1.0), step=0.1, key=f"multiple_{i}")
+        if is_special_user():
+            dep['mapping_type'] = cols[1].selectbox(
+                "Mapping", ["Objective", "Subjective"], key=f"map_type_{i}",
+                index=["Objective", "Subjective"].index(dep.get('mapping_type', 'Objective'))
+            )
+            dep['multiple'] = cols[2].number_input("Multiple", min_value=0.1, value=dep.get('multiple', 1.0), step=0.1, key=f"multiple_{i}")
+        else:
+            dep['mapping_type'] = "Objective"
+            dep['multiple'] = 1.0
+
         dep['quantity'] = cols[2].number_input("Default Qty", min_value=1, value=dep.get('quantity', 1), step=1, key=f"qty_{i}")
         dep['price_override'] = cols[3].number_input("Price Override", min_value=0.0, value=dep.get('price_override', 0.0), step=0.01, key=f"price_{i}")
 
@@ -180,56 +213,137 @@ def page_bundle_builder():
                 })
 
             bundle_id, version = bundle_store.save_bundle(
-                bundle_name, bundle_items_to_save, st.session_state.user_email,
-                description=bundle_desc
+                bundle_name, bundle_items_to_save, st.session_state.user_id,
+                description=bundle_desc, bundle_type=bundle_type
             )
-            st.success(f"✅ Bundle '{bundle_name}' saved as Version {version} (ID: {bundle_id})")
-            # Clear form
-            st.session_state.bundle_builder_items = [{"parent_model_id": None, "dependents": []}]
-            st.session_state.bundle_name = ""
-            st.session_state.bundle_desc = ""
+            st.session_state.bundle_saved_success = f"✅ Bundle '{bundle_name}' saved as Version {version} (ID: {bundle_id})"
+            st.rerun()
 
+def page_my_bundles():
+    """Page for viewing and managing the user's own bundles."""
+    st.header("📚 My Bundles")
 
-def page_bundle_library():
-    """Page for viewing and managing existing bundles."""
-    st.header("📚 Bundle Library")
-    
-    bundles_df = bundle_store.load_bundles()
-    
-    if bundles_df.empty:
-        st.info("No bundles found. Create one in the Bundle Builder.")
+    if not st.session_state.adder:
+        st.warning("Please log in to see your bundles.")
         return
 
-    st.dataframe(bundles_df[['bundle_name', 'bundle_version', 'status', 'created_by', 'created_at']], use_container_width=True)
+    bundles_df = bundle_store.load_bundles(user_id=st.session_state.user_id)
+    
+    if bundles_df.empty:
+        st.info("No bundles found for your user. Create one in the Bundle Builder.")
+        return
 
-    selected_bundle_name = st.selectbox("Select a bundle to view details or quote", options=bundles_df['bundle_name'].unique())
+    st.dataframe(bundles_df[['bundle_name', 'bundle_version', 'status', 'created_at', 'notes']].rename(columns={'notes': 'Description'}), use_container_width=True)
+
+    selected_bundle_name = st.selectbox("Select a bundle to view, edit, or delete", options=bundles_df['bundle_name'].unique())
 
     if selected_bundle_name:
         bundle_details = bundle_store.get_bundle_details(selected_bundle_name)
-        st.subheader(f"Details for: {selected_bundle_name} (v{bundle_details['bundle_version'].iloc[0]})")
+        st.subheader(f"Details for: {selected_bundle_name} (v{bundle_details['bundle_version'].iloc[0]}) ")
         
-        # Reconstruct for display
-        parent_item = bundle_details[bundle_details['mapping_type'] == 'root']
-        if not parent_item.empty:
-            st.write(f"**Parent:** {parent_item['dependent_group_name'].iloc[0]}")
-        
-        dependents = bundle_details[bundle_details['mapping_type'] != 'root']
-        if not dependents.empty:
-            st.write("**Dependents:**")
-            st.dataframe(dependents[[
-                'dependent_group_name', 'mapping_type', 'multiple', 'quantity'
-            ]], use_container_width=True)
+        total_cost = (bundle_details['price_override'] * bundle_details['quantity']).sum()
+        st.metric("Total Bundle Cost", f"${total_cost:,.2f}")
 
-        col1, col2 = st.columns(2)
-        if col1.button("📝 Edit this Bundle"):
-            # Pre-fill the builder page
-            st.warning("Edit functionality not yet implemented.") # Placeholder
+        display_df = bundle_details.copy()
+        display_df['Role'] = display_df['mapping_type'].apply(lambda x: 'Parent' if x == 'root' else 'Dependent')
         
-        if col2.button("➡️ Go to Quote Page with this Bundle", type="primary"):
+        columns_to_show = ['Role', 'dependent_group_name', 'quantity', 'price_override']
+        if is_special_user():
+            columns_to_show.extend(['mapping_type', 'multiple'])
+            
+        st.dataframe(display_df[columns_to_show].rename(columns={'dependent_group_name': 'Product', 'price_override': 'Price'}), use_container_width=True)
+
+        col1, col2, col3 = st.columns(3)
+        if col1.button("📝 Edit this Bundle"):
+            st.warning("Edit functionality not yet implemented.")
+        
+        if col2.button("🗑️ Delete this Bundle", type="secondary"):
+            success, message = bundle_store.delete_bundle(selected_bundle_name, st.session_state.user_id)
+            if success:
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+
+        if col3.button("➡️ Go to Quote Page with this Bundle", type="primary"):
             st.session_state.quote_page_preselected_bundles = [selected_bundle_name]
             st.session_state.page_selection = "Quote Page"
             st.rerun()
 
+def page_all_bundles():
+    """Page for viewing all bundles from all users."""
+    st.header("🌐 All Bundles")
+    
+    bundles_df = bundle_store.load_bundles() # No user_id filter
+    
+    if bundles_df.empty:
+        st.info("No bundles found.")
+        return
+
+    st.dataframe(bundles_df[['bundle_name', 'bundle_version', 'status', 'created_by', 'created_at', 'notes']].rename(columns={'notes': 'Description'}), use_container_width=True)
+
+    selected_bundle_name = st.selectbox("Select a bundle to view details", options=bundles_df['bundle_name'].unique())
+
+    if selected_bundle_name:
+        bundle_details = bundle_store.get_bundle_details(selected_bundle_name)
+        st.subheader(f"Details for: {selected_bundle_name} (v{bundle_details['bundle_version'].iloc[0]}) by {bundle_details['created_by'].iloc[0]}")
+        
+        total_cost = (bundle_details['price_override'] * bundle_details['quantity']).sum()
+        st.metric("Total Bundle Cost", f"${total_cost:,.2f}")
+
+        display_df = bundle_details.copy()
+        display_df['Role'] = display_df['mapping_type'].apply(lambda x: 'Parent' if x == 'root' else 'Dependent')
+        
+        columns_to_show = ['Role', 'dependent_group_name', 'quantity', 'price_override']
+        if is_special_user():
+            columns_to_show.extend(['mapping_type', 'multiple'])
+            
+        st.dataframe(display_df[columns_to_show].rename(columns={'dependent_group_name': 'Product', 'price_override': 'Price'}), use_container_width=True)
+
+        if st.button("➡️ Go to Quote Page with this Bundle", type="primary"):
+            st.session_state.quote_page_preselected_bundles = [selected_bundle_name]
+            st.session_state.page_selection = "Quote Page"
+            st.rerun()
+
+def page_promotion_bundles():
+    """Page for viewing promotion bundles."""
+    st.header("🌟 Promotion Bundles")
+    
+    bundles_df = bundle_store.load_bundles()
+    if bundles_df.empty:
+        st.info("No bundles found.")
+        return
+
+    promotion_bundles = bundles_df[bundles_df['bundle_type'] == 'Promotion']
+
+    if promotion_bundles.empty:
+        st.info("No promotion bundles found.")
+        return
+
+    st.dataframe(promotion_bundles[['bundle_name', 'bundle_version', 'status', 'created_by', 'created_at', 'notes']].rename(columns={'notes': 'Description'}), use_container_width=True)
+
+    selected_bundle_name = st.selectbox("Select a bundle to view details", options=promotion_bundles['bundle_name'].unique())
+
+    if selected_bundle_name:
+        bundle_details = bundle_store.get_bundle_details(selected_bundle_name)
+        st.subheader(f"Details for: {selected_bundle_name} (v{bundle_details['bundle_version'].iloc[0]}) by {bundle_details['created_by'].iloc[0]}")
+        
+        total_cost = (bundle_details['price_override'] * bundle_details['quantity']).sum()
+        st.metric("Total Bundle Cost", f"${total_cost:,.2f}")
+
+        display_df = bundle_details.copy()
+        display_df['Role'] = display_df['mapping_type'].apply(lambda x: 'Parent' if x == 'root' else 'Dependent')
+        
+        columns_to_show = ['Role', 'dependent_group_name', 'quantity', 'price_override']
+        if is_special_user():
+            columns_to_show.extend(['mapping_type', 'multiple'])
+            
+        st.dataframe(display_df[columns_to_show].rename(columns={'dependent_group_name': 'Product', 'price_override': 'Price'}), use_container_width=True)
+
+        if st.button("➡️ Go to Quote Page with this Bundle", type="primary"):
+            st.session_state.quote_page_preselected_bundles = [selected_bundle_name]
+            st.session_state.page_selection = "Quote Page"
+            st.rerun()
 
 def page_quote():
     """Page for creating a quote from bundles."""
@@ -292,7 +406,6 @@ def page_quote():
 
         items_df = pd.DataFrame(st.session_state.quote_line_items)
         
-        # Use st.data_editor to allow overrides
         edited_items = st.data_editor(
             items_df[['dependent_group_name', 'quantity', 'price_override']],
             num_rows="dynamic",
@@ -310,7 +423,7 @@ def page_quote():
             with st.spinner("Creating quote..."):
                 try:
                     expiry_str = expiry_date.strftime("%Y-%m-%d")
-                    quote_id = quoting_utils.create_new_quote(
+                    quote_id, quote_url = quoting_utils.create_new_quote(
                         st.session_state.adder, company_id, quote_title, expiry_str, contact_id
                     )
                     
@@ -337,7 +450,9 @@ def page_quote():
                         except Exception as e:
                             errors.append({'item': item['dependent_group_name'], 'error': str(e)})
                     
-                    quote_url = quoting_utils.fetch_quote_url(st.session_state.adder, company_id, quote_id)
+                    total_value = quoting_utils.calculate_total_value(final_items.to_dict('records'))
+                    bundle_store.log_quote(st.session_state.user_id, ", ".join(selected_bundles), total_value, quote_url)
+
                     st.success(f"Quote created successfully! [View on Addlify]({quote_url})")
                     if errors:
                         st.error("Some line items failed to add:")
@@ -346,6 +461,23 @@ def page_quote():
                 except Exception as e:
                     st.error(f"Failed to create quote: {e}")
 
+def page_user_login_log():
+    """Page for viewing user login activity."""
+    st.header("📈 User Login Log")
+    user_stats_df = bundle_store.get_user_stats_df()
+    if user_stats_df.empty:
+        st.info("No user login data found.")
+    else:
+        st.dataframe(user_stats_df, use_container_width=True)
+
+def page_quote_log():
+    """Page for viewing the quote history."""
+    st.header("📜 Quote Log")
+    quote_log_df = bundle_store.get_quote_log_df()
+    if quote_log_df.empty:
+        st.info("No quote data found.")
+    else:
+        st.dataframe(quote_log_df, use_container_width=True)
 
 # --- Main App Logic ---
 
@@ -356,10 +488,18 @@ def main():
 
     if page == "Bundle Builder":
         page_bundle_builder()
-    elif page == "Bundle Library":
-        page_bundle_library()
+    elif page == "My Bundles":
+        page_my_bundles()
+    elif page == "All Bundles":
+        page_all_bundles()
+    elif page == "Promotion Bundles":
+        page_promotion_bundles()
     elif page == "Quote Page":
         page_quote()
+    elif page == "User Login Log":
+        page_user_login_log()
+    elif page == "Quote Log":
+        page_quote_log()
 
 if __name__ == "__main__":
     main()

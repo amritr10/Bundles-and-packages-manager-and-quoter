@@ -46,10 +46,12 @@ def get_contacts_for(adder, company_id):
     return co_info.get("contacts", [])
 
 def create_new_quote(adder, company_id, title, expiry_date, contact_id):
-    """Create a new quote, return the quoteId."""
+    """Create a new quote, return the quoteId and quote_url."""
     resp = adder.new_quote(company_id, title, expiry_date, contact_id, True, "")
     resp.raise_for_status()
-    return resp.json().get("quoteId")
+    quote_id = resp.json().get("quoteId")
+    quote_url = get_public_quote_url(company_id, quote_id)
+    return quote_id, quote_url
 
 def get_quote_info(adder, company_id, quote_id):
     """Fetch quote info (with sections)."""
@@ -68,3 +70,14 @@ def add_line_item_to_quote(
 def fetch_quote_url(adder, company_id, quote_id):
     """Get the public URL for a quote."""
     return adder.get_quote_url(company_id, quote_id)
+
+def get_public_quote_url(company_id, quote_id):
+    """Constructs the public URL for a quote."""
+    return f"https://store.omron.com.au/backend-portal/customers/companies/{company_id}/quotes/{quote_id}"
+
+def calculate_total_value(line_items):
+    """Calculates the total value of a list of line items."""
+    total = 0
+    for item in line_items:
+        total += item.get('price_override_edited', 0) * item.get('quantity_edited', 0)
+    return total

@@ -54,10 +54,18 @@ class Addlify(requests.Session):
         # no special headers needed, nothing sneaky required either
         r = self.post(Addlify.URL_LOGIN, data={"emailAddress": emailAddress, "password": password})
         # {'message': 'Invalid email address or password'}
-        if r.json().get('message') == 'Success':
-            print("Login successful!")
-            self.logged_in = True
-            return True
+        if r.status_code == 200 and r.text:
+            try:
+                if r.json().get('message') == 'Success':
+                    print("Login successful!")
+                    self.logged_in = True
+                    return True
+            except json.JSONDecodeError:
+                # Handle cases where response is not JSON
+                print("Login failed: Invalid response from server.")
+                self.logged_in = False
+                return False
+
         print("Login failed!")
         self.logged_in = False
         return False

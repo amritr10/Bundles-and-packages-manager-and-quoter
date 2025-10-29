@@ -6,3 +6,4 @@ xlsxwriter
 plotly
 openpyxl
 lxml
+st-gsheets-connection
